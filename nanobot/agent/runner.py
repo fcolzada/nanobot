@@ -12,6 +12,7 @@ from uuid import uuid4
 from loguru import logger
 
 from nanobot.agent.context import TranscriptInput
+from nanobot.agent.llm_rate_limit import RateLimiter
 from nanobot.agent.context_governance import (
     ContextCompactionState,
     ContextGovernanceConfig,
@@ -26,6 +27,7 @@ from nanobot.agent.hook import AgentHook, AgentHookContext, AgentRunHookContext
 from nanobot.agent.tools.context import tool_log_content_allowed
 from nanobot.agent.tools.execution import ToolCallResult, execute_tool_calls
 from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.bus.outbound_events import ProgressEvent
 from nanobot.events import NO_EVENTS, EventSink, ModelRequestEvent
 from nanobot.llm_usage.context import (
     LLMUsageSource,
@@ -124,6 +126,8 @@ class AgentRunSpec:
     provider_state: ProviderConversationState | None = None
     llm_usage_source: LLMUsageSource | None = None
     events: EventSink = NO_EVENTS
+    rate_limiter: RateLimiter | None = None
+    """Optional RPM limiter; acquire() is called before each provider request."""
 
 
 @dataclass(slots=True)
@@ -975,6 +979,58 @@ class AgentRunner:
         await emit("failed" if response.finish_reason == "error" else "completed")
         return response
 
+    async def _acquire_rpm_slot(self, spec: AgentRunSpec) -> None:
+        """Acquire an RPM slot while publishing periodic status updates to the UI.
+
+        While the limiter is blocked (window full or provider cooldown), a
+        background task publishes a ``ProgressEvent`` every second so the
+        client can show a "RPM limit reached, waiting…" message instead of a
+        silent ``nanobot is thinking`` state.
+        """
+        if spec.rate_limiter is None:
+            return
+
+        wait_info: dict[str, float] = {"seconds": 0.0}
+
+        def _on_wait(seconds: float) -> None:
+            wait_info["seconds"] = seconds
+
+        stop = asyncio.Event()
+        status_task: asyncio.Task[None] | None = None
+
+        async def _publish_loop() -> None:
+            while not stop.is_set():
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
+                if stop.is_set():
+                    break
+                if (
+                    wait_info["seconds"] > 0
+                    and spec.events.accepts(ProgressEvent)
+                ):
+                    await spec.events.emit(
+                        ProgressEvent(
+                            content=(
+                                f"⏳ RPM limit reached — next call in "
+                                f"{int(wait_info['seconds'])}s"
+                            )
+                        )
+                    )
+
+        try:
+            status_task = asyncio.create_task(_publish_loop())
+            await spec.rate_limiter.acquire(spec.session_key, on_wait=_on_wait)
+        finally:
+            stop.set()
+            if status_task is not None:
+                status_task.cancel()
+                try:
+                    await status_task
+                except asyncio.CancelledError:
+                    pass
+
     async def _request_model(
         self,
         spec: AgentRunSpec,
@@ -1115,6 +1171,7 @@ class AgentRunner:
             if generation_elapsed_s > 0:
                 response.generation_ms = max(1, round(generation_elapsed_s * 1000))
 
+        await self._acquire_rpm_slot(spec)
         coro = self._invoke_model(spec, request_state, kwargs, record_timing=record_timing)
 
         # Providers bound the wait for each stream event, including reasoning and tool deltas.
@@ -1122,6 +1179,13 @@ class AgentRunner:
         try:
             response = await coro
             _raise_if_cancelling()
+            if spec.rate_limiter is not None and response.error_status_code == 429:
+                retry_after_s = response.retry_after or response.error_retry_after_s
+                if retry_after_s is not None:
+                    ms = max(1000, min(3_600_000, int(retry_after_s * 1000)))
+                else:
+                    ms = 60_000
+                await spec.rate_limiter.set_cooldown(ms)
         except asyncio.CancelledError:
             _pause_generation()
             await _close_native_reasoning()
@@ -1357,6 +1421,7 @@ class AgentRunner:
             transcript=transcript,
         )
         _raise_if_cancelling()
+        await self._acquire_rpm_slot(spec)
         response = await self._invoke_model(spec, request_state, kwargs)
         _raise_if_cancelling()
         await self.context_governor.summarize_provider_compaction(

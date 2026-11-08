@@ -20,6 +20,7 @@ from loguru import logger
 from nanobot.agent import context as agent_context
 from nanobot.agent import model_presets as preset_helpers
 from nanobot.agent.autocompact import AutoCompact
+from nanobot.agent.llm_rate_limit import RateLimiter
 from nanobot.agent.context import ContextBuilder, PersistedPromptContextResolver, TranscriptInput
 from nanobot.agent.cron_turns import CronTurnCoordinator
 from nanobot.agent.execution_policy import ExecutionControlError, ExecutionPolicy, ExecutionScope
@@ -442,6 +443,25 @@ class AgentLoop:
         self._concurrency_gate: asyncio.Semaphore | None = (
             asyncio.Semaphore(_max) if _max > 0 else None
         )
+        # NANOBOT_RPM_LIMIT: max provider requests per minute (0/unset = disabled).
+        self._rpm_limit_env: int | None = None
+        _raw = os.environ.get("NANOBOT_RPM_LIMIT", "").strip()
+        if _raw:
+            try:
+                _val = int(_raw)
+                if _val > 0:
+                    self._rpm_limit_env = _val
+                else:
+                    logger.warning(
+                        "Ignoring non-positive NANOBOT_RPM_LIMIT={!r}; rate limiting disabled",
+                        _raw,
+                    )
+            except ValueError:
+                logger.warning(
+                    "Ignoring invalid NANOBOT_RPM_LIMIT={!r}; rate limiting disabled",
+                    _raw,
+                )
+        self._rate_limiter = RateLimiter(get_limit=self._rpm_limit_for_session)
         self.auto_compact = AutoCompact(
             sessions=self.sessions,
             consolidator=self.consolidator,
@@ -598,6 +618,53 @@ class AgentLoop:
             create_if_missing=True,
         )
         return runtime
+
+    # ------------------------------------------------------------------ RPM limit
+
+    _RPM_LIMIT_META_KEY = "_rpm_limit"
+
+    def _rpm_limit_for_session(self, session_key: str | None) -> int | None:
+        """Resolve the effective RPM limit for a session.
+
+        Precedence: per-session override (set via ``/rpm``) > env var > disabled.
+        """
+        if session_key is None:
+            return self._rpm_limit_env
+        try:
+            metadata = self.sessions.state.get_cached_metadata(session_key)
+        except Exception:
+            metadata = None
+        if isinstance(metadata, dict):
+            override = metadata.get(self._RPM_LIMIT_META_KEY)
+            if override is not None:
+                if override == "off":
+                    return None
+                try:
+                    return int(override)
+                except (TypeError, ValueError):
+                    pass
+        return self._rpm_limit_env
+
+    async def set_session_rpm_limit(
+        self,
+        session_key: str,
+        limit: int | None,
+    ) -> None:
+        """Persist a per-session RPM override (or remove it with ``None``)."""
+        if limit is None:
+            await self.sessions.state.update_metadata(
+                session_key,
+                {},
+                remove=(self._RPM_LIMIT_META_KEY,),
+            )
+        else:
+            await self.sessions.state.update_metadata(
+                session_key,
+                {self._RPM_LIMIT_META_KEY: limit},
+                create_if_missing=True,
+            )
+        # Wake any waiters so the new limit takes effect immediately.
+        self._rate_limiter.notify_limit_changed()
 
     def _publish_runtime_selection(
         self,
@@ -1340,6 +1407,7 @@ class AgentLoop:
                     metadata=request_metadata,
                 ),
                 events=events,
+                rate_limiter=self._rate_limiter,
             ))
         finally:
             turn_scope_stack.close()

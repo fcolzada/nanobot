@@ -136,6 +136,14 @@ CORE_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "circle-help",
     ),
     BuiltinCommandSpec(
+        "/rpm",
+        "Set requests-per-minute limit",
+        "Show or set the per-session LLM requests-per-minute (RPM) limit.",
+        "gauge",
+        "[n|off|reset]",
+        accepts_args=True,
+    ),
+    BuiltinCommandSpec(
         "/pairing",
         "Manage pairing",
         "List, approve, deny or revoke pairing requests.",
@@ -925,6 +933,100 @@ async def cmd_help(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_rpm(ctx: CommandContext) -> OutboundMessage:
+    """Show or set the per-session LLM requests-per-minute limit.
+
+    Usage:
+        /rpm          — show current limit, source, and window usage
+        /rpm <n>      — set session override to n requests/minute
+        /rpm off      — disable rate limiting for this session
+        /rpm reset    — remove the session override
+    """
+    loop = ctx.loop
+    args = ctx.args.strip().lower()
+    metadata = {**dict(ctx.msg.metadata or {}), "render_as": "text"}
+    key = ctx.key
+
+    if args == "off":
+        await loop.set_session_rpm_limit(key, None)
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content="RPM limit disabled for this session.",
+            metadata=metadata,
+        )
+
+    if args == "reset":
+        await loop.set_session_rpm_limit(key, None)
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content="RPM session override reset.",
+            metadata=metadata,
+        )
+
+    if args:
+        try:
+            value = int(args)
+        except ValueError:
+            return OutboundMessage(
+                channel=ctx.msg.channel,
+                chat_id=ctx.msg.chat_id,
+                content=(
+                    'Usage: /rpm [n|off|reset]\n'
+                    "  n      — positive integer, requests per minute\n"
+                    "  off    — disable rate limiting for this session\n"
+                    "  reset  — remove the session override"
+                ),
+                metadata=metadata,
+            )
+        if value <= 0:
+            return OutboundMessage(
+                channel=ctx.msg.channel,
+                chat_id=ctx.msg.chat_id,
+                content="RPM limit must be a positive integer.",
+                metadata=metadata,
+            )
+        await loop.set_session_rpm_limit(key, value)
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content=f"RPM limit set to {value} requests/minute for this session.",
+            metadata=metadata,
+        )
+
+    # No args: show current status.
+    limit = loop._rpm_limit_for_session(key)
+    usage = loop._rate_limiter.usage(key)
+    session_meta = loop.sessions.state.get_cached_metadata(key) or {}
+
+    if limit is None:
+        limit_display = "disabled"
+        source = "off"
+    elif loop._RPM_LIMIT_META_KEY in session_meta:
+        limit_display = str(limit)
+        source = "override"
+    elif loop._rpm_limit_env is not None:
+        limit_display = str(limit)
+        source = "env"
+    else:
+        limit_display = "disabled"
+        source = "off"
+
+    content = [
+        f"RPM limit: {limit_display}",
+        f"Source: {source}",
+        f"Window usage: {usage.used}/{usage.limit if usage.limit is not None else '∞'} "
+        f"requests in the last 60s",
+    ]
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content="\n".join(content),
+        metadata=metadata,
+    )
+
+
 def build_help_text(specs: tuple[BuiltinCommandSpec, ...] = CORE_COMMAND_SPECS) -> str:
     """Build help text for the commands registered in one application."""
     lines = ["🐈 nanobot commands:"]
@@ -965,5 +1067,7 @@ def register_core_commands(router: CommandRouter) -> None:
     router.exact("/help", cmd_help)
     router.exact("/pairing", cmd_pairing)
     router.prefix("/pairing ", cmd_pairing)
+    router.exact("/rpm", cmd_rpm)
+    router.prefix("/rpm ", cmd_rpm)
     router.exact(USER_SHELL_COMMAND, cmd_user_shell)
     router.prefix(f"{USER_SHELL_COMMAND} ", cmd_user_shell)
