@@ -572,6 +572,9 @@ class SessionState:
                 if existing != before and existing != after:
                     raise SessionConflictError(f"session {name} changed")
                 setattr(current, name, deepcopy(after))
+        # last_user_activity is updated in-memory during user message persistence
+        # (before turn commit), so copy it from draft without conflict check
+        current.last_user_activity = draft.last_user_activity
         acknowledge_pending_followups(current, draft.consumed_followup_ids)
         current.policy = draft.policy
         current.updated_at = max(current.updated_at, draft.updated_at)
