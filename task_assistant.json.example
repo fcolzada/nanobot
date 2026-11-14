@@ -1,0 +1,14 @@
+{
+  "prompts": {
+    "morning_briefing": "Review my TASKS.md and give me a morning briefing:\n\n1. What's due today or overdue?\n2. What are my high-priority active tasks?\n3. What should I focus on first?\n4. Any tasks that should be moved to backlog or broken down?\n5. Any tasks I can mark complete?\n\nBe concise and actionable. Use the task tool to read and update tasks as needed.",
+    "evening_review": "Review my TASKS.md and give me an evening summary:\n\n1. What did I complete today?\n2. What's still in progress?\n3. What should be prioritized for tomorrow?\n4. Any new tasks to add?\n\nBe concise. Update task statuses/priorities as appropriate.",
+    "hourly_checkin": "Check if I've been inactive for more than 30 minutes using the inactivity tool.\n\nIf I have been inactive (is_inactive: true):\n- Give me a gentle check-in about my current task progress\n- Ask what I'm working on or if I need help\n- Suggest breaking down large tasks if I seem stuck\n- Be brief and supportive\n\nIf I have NOT been inactive (is_inactive: false):\n- Simply acknowledge and end (no need to engage)\n- Say something like \"You're active, skipping check-in\""
+  },
+  "schedule": {
+    "morning_cron": "0 9 * * *",
+    "evening_cron": "0 18 * * *",
+    "checkin_cron": "0 * * * 1-5"
+  },
+  "timezone": "Europe/Rome",
+  "session_key": "telegram:27748529"
+}

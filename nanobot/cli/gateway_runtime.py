@@ -588,6 +588,10 @@ def _run_claimed_gateway(
     register_image_generation_tool(config, tools, workspace=config.workspace_path)
     mcp_provider = MCPProvider.from_config(config, tools)
 
+    # Setup task assistant (tool + cron jobs)
+    from nanobot.agent.task_assistant import setup_task_assistant_from_config
+    setup_task_assistant_from_config(tools, cron, session_manager, config)
+
     recovery = RecoveryCoordinator(
         sessions=session_manager,
         bus=bus,

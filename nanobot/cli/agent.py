@@ -133,6 +133,7 @@ def _run_classic(runtime_config: Config, *, message: str | None, session_id: str
     from nanobot.agent.tools.image_generation import register_image_generation_tool
     from nanobot.agent.tools.mcp import MCPProvider
     from nanobot.agent.tools.registry import ToolRegistry
+    from nanobot.agent.task_assistant import setup_task_assistant_from_config
     from nanobot.bus.outbound_events import (
         StreamDeltaEvent,
         StreamedResponseEvent,
@@ -178,6 +179,17 @@ def _run_classic(runtime_config: Config, *, message: str | None, session_id: str
     register_image_generation_tool(runtime_config, tools, workspace=runtime_config.workspace_path)
     mcp_provider = MCPProvider.from_config(runtime_config, tools)
 
+    # Create session manager early for task assistant tools
+    from nanobot.session.manager import SessionManager
+    data_dir = runtime_config.runtime_data_dir
+    session_manager = SessionManager(
+        runtime_config.workspace_path,
+        sessions_root=data_dir / "sessions" if data_dir is not None else None,
+    )
+
+    # Setup task assistant (tool + cron jobs)
+    setup_task_assistant_from_config(tools, cron, session_manager, runtime_config, session_key=session_id)
+
     _set_nanobot_logs(logs)
     from nanobot.goal.assembly import install_goal
 
@@ -190,10 +202,23 @@ def _run_classic(runtime_config: Config, *, message: str | None, session_id: str
             hook_factories=[create_file_edit_activity_hook],
             tool_registry=tools,
             builtin_assembly=install_goal,
+            session_manager=session_manager,
         )
     except ValueError as exc:
         _print_agent_start_error(exc)
         raise typer.Exit(1) from exc
+
+    # Set up cron service to submit bound cron jobs to the agent loop
+    from nanobot.cron.bound_runner import run_bound_cron_job
+    from nanobot.cron.session_turns import is_bound_cron_job
+
+    async def _on_cron_job(job):
+        if is_bound_cron_job(job):
+            return await run_bound_cron_job(job, agent=agent_loop, cron=cron)
+        return None
+
+    cron.on_job = _on_cron_job
+
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):
         cli_terminal._print_agent_response(
@@ -206,6 +231,7 @@ def _run_classic(runtime_config: Config, *, message: str | None, session_id: str
             await agent_loop.aclose()
         finally:
             await mcp_provider.aclose()
+            cron.stop()
 
     _thinking: ThinkingSpinner | None = None
 
@@ -255,6 +281,7 @@ def _run_classic(runtime_config: Config, *, message: str | None, session_id: str
         async def run_once() -> None:
             try:
                 await mcp_provider.connect()
+                await cron.start()
                 renderer = stream_renderer_class(
                     render_markdown=markdown,
                     bot_name=runtime_config.agents.defaults.bot_name,
@@ -316,6 +343,7 @@ def _run_classic(runtime_config: Config, *, message: str | None, session_id: str
 
         async def run_interactive() -> None:
             await mcp_provider.connect()
+            await cron.start()
             bus_task = asyncio.create_task(agent_loop.run())
             turn_done = asyncio.Event()
             turn_done.set()
