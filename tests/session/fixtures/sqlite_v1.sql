@@ -1,6 +1,7 @@
 CREATE TABLE storage_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE sessions (
     key TEXT PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    last_user_activity TEXT NOT NULL,
     metadata TEXT NOT NULL, provider_state TEXT, last_archived INTEGER NOT NULL,
     revision INTEGER NOT NULL, generation TEXT NOT NULL,
     title TEXT NOT NULL, preview TEXT NOT NULL, visible_updated_at TEXT

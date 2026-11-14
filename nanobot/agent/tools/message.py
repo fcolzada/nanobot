@@ -243,6 +243,11 @@ class MessageTool(Tool):
             logger.debug("MessageTool: delivery suppressed during internal check")
             return f"Message acknowledged for {channel}:{chat_id} (not delivered)"
 
+        # Suppress NOOP responses from cron jobs (e.g., hourly check-in when active)
+        if content.strip() == "__NOOP__":
+            logger.debug("MessageTool: suppressing NOOP response")
+            return f"Message suppressed (NOOP) for {channel}:{chat_id}"
+
         try:
             await self._send_callback(msg)
             sends = _CURRENT_MESSAGE_SENDS.get()

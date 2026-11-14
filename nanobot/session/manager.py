@@ -139,6 +139,7 @@ class Session:
     messages: list[dict[str, Any]] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
+    last_user_activity: datetime = field(default_factory=datetime.now, compare=False)
     metadata: dict[str, Any] = field(default_factory=dict)
     # Keep the legacy storage name while persisted sessions and SDK callers migrate.
     last_consolidated: int = 0
@@ -185,7 +186,10 @@ class Session:
             **kwargs
         }
         self.messages.append(msg)
-        self.updated_at = datetime.now()
+        now = datetime.now()
+        self.updated_at = now
+        if role == "user":
+            self.last_user_activity = now
 
     def commit_summary_checkpoint(
         self,

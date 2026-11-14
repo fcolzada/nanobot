@@ -27,17 +27,12 @@ _INACTIVITY_PARAMETERS = tool_parameters_schema(
         "Action to perform",
         enum=("check",),
     ),
-    threshold_minutes=IntegerSchema(
-        description="Inactivity threshold in minutes (default: 30)",
-        minimum=1,
-        maximum=1440,
-    ),
     session_key=StringSchema(
         "Session key to check (default: current session)"
     ),
     required=["action"],
     description=(
-        "Check if the user has been inactive for more than the threshold. "
+        "Check if the user has been inactive for more than the configured threshold. "
         "Returns the inactivity duration and whether it exceeds the threshold. "
         "Useful for cron jobs that should only engage when the user is away."
     ),
@@ -53,8 +48,9 @@ class InactivityTool(Tool):
         "Use in cron jobs to conditionally engage only when user is away."
     )
 
-    def __init__(self, session_manager: SessionManager):
+    def __init__(self, session_manager: SessionManager, threshold_minutes: int = 30):
         self.session_manager = session_manager
+        self.threshold_minutes = threshold_minutes
 
     @classmethod
     def create(cls, ctx: ToolContext) -> InactivityTool:
@@ -79,7 +75,6 @@ class InactivityTool(Tool):
         self,
         *,
         action: str,
-        threshold_minutes: int = 30,
         session_key: str | None = None,
     ) -> ToolResult:
         if action != "check":
@@ -100,10 +95,10 @@ class InactivityTool(Tool):
         except KeyError:
             return ToolResult.error(f"Session not found: {session_key}")
 
-        # Calculate inactivity
-        # Session.updated_at uses datetime.now() (local time), so compare in local timezone
+        # Calculate inactivity based on last user activity (not cron activity)
+        # Session.last_user_activity uses datetime.now() (local time), so compare in local timezone
         now = datetime.now().astimezone()
-        last_active = session.updated_at
+        last_active = session.last_user_activity
         if last_active.tzinfo is None:
             # Assume session.updated_at is local time
             last_active = last_active.replace(tzinfo=now.tzinfo)
@@ -112,18 +107,24 @@ class InactivityTool(Tool):
 
         inactive_seconds = (now - last_active).total_seconds()
         inactive_minutes = int(inactive_seconds / 60)
-        is_inactive = inactive_minutes >= threshold_minutes
+        effective_threshold = self.threshold_minutes
+        is_inactive = inactive_minutes >= effective_threshold
 
         import json
         return ToolResult(json.dumps({
             "inactive_minutes": inactive_minutes,
             "is_inactive": is_inactive,
-            "threshold_minutes": threshold_minutes,
+            "threshold_minutes": effective_threshold,
             "last_active": last_active.isoformat(),
             "checked_at": now.isoformat(),
         }))
 
 
-def register_inactivity_tool(tools: ToolRegistry, session_manager: SessionManager) -> None:
-    """Register the inactivity tool with the given registry."""
-    tools.register(InactivityTool(session_manager))
+def register_inactivity_tool(
+    tools: ToolRegistry, session_manager: SessionManager, threshold_minutes: int = 30
+) -> None:
+    """Register the inactivity tool with the given registry.
+
+    The configured threshold always wins; the LLM-supplied value is ignored.
+    """
+    tools.register(InactivityTool(session_manager, threshold_minutes=threshold_minutes))

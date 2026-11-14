@@ -23,6 +23,7 @@ from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.llm_rate_limit import RateLimiter
 from nanobot.agent.context import ContextBuilder, PersistedPromptContextResolver, TranscriptInput
 from nanobot.agent.cron_turns import CronTurnCoordinator
+from nanobot.cron.session_turns import is_cron_turn
 from nanobot.agent.execution_policy import ExecutionControlError, ExecutionPolicy, ExecutionScope
 from nanobot.agent.hook import AgentHook, AgentTurnHookFactory
 from nanobot.agent.memory import Consolidator
@@ -1108,7 +1109,7 @@ class AgentLoop:
                 return
             public_payload = dict(payload)
             preceding = Session(key=session.key)
-            self._save_turn(preceding, public_payload["preceding_messages"], skip=0)
+            self._save_turn(preceding, public_payload["preceding_messages"], skip=0, turn_kind=TurnKind.SYSTEM)
             public_payload["preceding_messages"] = preceding.messages
             public_payload["consumed_followup_ids"] = sorted(preceding.consumed_followup_ids)
             private_state = public_payload.pop("provider_state", None)
@@ -2417,11 +2418,16 @@ class AgentLoop:
             turn_continuation.record_iteration_limit(
                 session.metadata, ctx.stop_reason,
             )
+        # Cron turns should not update the session's updated_at, as they would
+        # incorrectly reset the inactivity timer.
+        is_cron = is_cron_turn(ctx.msg.metadata)
         self._save_turn(
             session, ctx.all_messages, ctx.save_skip,
             turn_latency_ms=ctx.turn_latency_ms,
             summary_checkpoint=None if ctx.ephemeral else ctx.summary_checkpoint,
             input_persisted_early=ctx.input_persisted_early,
+            is_cron_turn=is_cron,
+            turn_kind=ctx.kind,
         )
         if (
             not ctx.ephemeral
@@ -2527,6 +2533,8 @@ class AgentLoop:
         turn_latency_ms: int | None = None,
         summary_checkpoint: SessionSummaryCheckpoint | None = None,
         input_persisted_early: bool = False,
+        is_cron_turn: bool = False,
+        turn_kind: TurnKind = TurnKind.USER,
     ) -> None:
         declared_tool_call_ids = {
             str(tc["id"])
@@ -2643,6 +2651,9 @@ class AgentLoop:
             session.messages[last_assistant_idx]["latency_ms"] = int(turn_latency_ms)
         session.consumed_followup_ids |= saved_followup_ids
         session.updated_at = datetime.now()
+        # Update last_user_activity only for user turns (not cron)
+        if not is_cron_turn and turn_kind is TurnKind.USER:
+            session.last_user_activity = datetime.now()
 
     def _persist_subagent_followup(self, session: Session, msg: InboundMessage) -> bool:
         if not msg.content:

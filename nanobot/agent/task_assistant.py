@@ -43,7 +43,7 @@ DEFAULT_EVENING_REVIEW_PROMPT = """Review my TASKS.md and give me an evening sum
 Be concise. Update task statuses/priorities as appropriate."""
 
 
-DEFAULT_HOURLY_CHECKIN_PROMPT = """Check if I've been inactive for more than 30 minutes using the inactivity tool.
+DEFAULT_HOURLY_CHECKIN_PROMPT = """Check if I've been inactive using the inactivity tool with the configured threshold.
 
 If I have been inactive (is_inactive: true):
 - Give me a gentle check-in about my current task progress
@@ -52,8 +52,8 @@ If I have been inactive (is_inactive: true):
 - Be brief and supportive
 
 If I have NOT been inactive (is_inactive: false):
-- Simply acknowledge and end (no need to engage)
-- Say something like "You're active, skipping check-in"
+- Return exactly: __NOOP__
+- Do not add any other text
 """
 
 
@@ -138,6 +138,7 @@ def setup_task_assistant(
     evening_cron: str = "0 18 * * *",      # 6 PM
     checkin_cron: str = "0 * * * 1-5",   # Every hour, Mon-Fri
     timezone: str = "Europe/Rome",
+    threshold_minutes: int | None = None,
 ) -> None:
     """Register task tool, inactivity tool, and optional cron jobs.
 
@@ -167,7 +168,8 @@ def setup_task_assistant(
             "evening_cron": "0 19 * * *",
             "checkin_cron": "0 * * * *"
         },
-        "timezone": "America/New_York"
+        "timezone": "America/New_York",
+        "session_key": "telegram:27748529"
     }
     """
     # Load config file for prompt/schedule overrides
@@ -186,14 +188,18 @@ def setup_task_assistant(
     checkin_cron = schedule.get("checkin_cron", checkin_cron)
     timezone = config.get("timezone", timezone)
     session_key = config.get("session_key", session_key)
+    configured_threshold = config.get("threshold_minutes")
+    if configured_threshold is not None:
+        threshold_minutes = configured_threshold
 
     memory_dir = workspace / "memory"
 
     # Register the task tool
     register_task_tool(tools, memory_dir)
 
-    # Register the inactivity tool
-    register_inactivity_tool(tools, session_manager)
+    # Register the inactivity tool (config always wins; falls back to 30 if unset)
+    effective_threshold = threshold_minutes if threshold_minutes is not None else 30
+    register_inactivity_tool(tools, session_manager, threshold_minutes=effective_threshold)
 
     # Register cron jobs
     # Parse session_key into channel and chat_id for proper binding

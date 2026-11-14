@@ -48,6 +48,7 @@ def _create_schema_v1(db: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS storage_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
         """CREATE TABLE IF NOT EXISTS sessions (
             key TEXT PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            last_user_activity TEXT NOT NULL,
             metadata TEXT NOT NULL, provider_state TEXT, last_archived INTEGER NOT NULL,
             revision INTEGER NOT NULL, generation TEXT NOT NULL,
             title TEXT NOT NULL, preview TEXT NOT NULL, visible_updated_at TEXT
@@ -117,9 +118,24 @@ def _create_schema_v4(db: sqlite3.Connection) -> None:
     db.execute("ALTER TABLE session_archives_v4 RENAME TO session_archives")
 
 
+def _create_schema_v5(db: sqlite3.Connection) -> None:
+    # Add last_user_activity column to existing sessions table if missing
+    # Use updated_at for existing rows
+    row = db.execute("""
+        SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'last_user_activity'
+    """).fetchone()
+    if row is None:
+        # Add column without NOT NULL first
+        db.execute("ALTER TABLE sessions ADD COLUMN last_user_activity TEXT")
+        # Populate existing rows with updated_at
+        db.execute("UPDATE sessions SET last_user_activity = updated_at WHERE last_user_activity IS NULL")
+        # Note: SQLite doesn't support ALTER COLUMN to add NOT NULL after the fact
+        # but new inserts will have the value from the application layer
+
+
 # Entries upgrade version N to N+1. Preserve released entries and append upgrades.
 _SCHEMA_MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
-    _create_schema_v1, _create_schema_v2, _create_schema_v3, _create_schema_v4,
+    _create_schema_v1, _create_schema_v2, _create_schema_v3, _create_schema_v4, _create_schema_v5,
 )
 
 
@@ -311,6 +327,7 @@ class SqliteSessionStore:
                 )] if history else [],
                 created_at=datetime.fromisoformat(row["created_at"]),
                 updated_at=datetime.fromisoformat(row["updated_at"]),
+                last_user_activity=datetime.fromisoformat(row["last_user_activity"]),
                 metadata=self._metadata(db, key, row["metadata"]),
                 last_consolidated=row["last_archived"],
                 provider_state=ProviderConversationState.from_private_record(
@@ -395,15 +412,17 @@ class SqliteSessionStore:
                 if message_start:
                     raise ValueError("a new session must include its full history")
                 db.execute("""INSERT INTO sessions (
-                    key, created_at, updated_at, metadata, provider_state, last_archived,
+                    key, created_at, updated_at, last_user_activity, metadata, provider_state, last_archived,
                     revision, generation, title, preview, visible_updated_at
-                ) VALUES (?, ?, ?, '{}', NULL, 0, 0, ?, '', '', NULL)""", (
-                    session.key, session.created_at.isoformat(), session.updated_at.isoformat(), session.generation,
+                ) VALUES (?, ?, ?, ?, '{}', NULL, 0, 0, ?, '', '', NULL)""", (
+                    session.key, session.created_at.isoformat(), session.updated_at.isoformat(),
+                    session.last_user_activity.isoformat(), session.generation,
                 ))
             elif row[0] != session.revision or row[1] != session.generation:
                 raise SessionConflictError("session history changed")
-            db.execute("UPDATE sessions SET updated_at=?, provider_state=?, last_archived=?, revision=revision+1, preview=?, visible_updated_at=? WHERE key=?", (
-                session.updated_at.isoformat(), provider, session.last_archived,
+            db.execute("UPDATE sessions SET updated_at=?, last_user_activity=?, provider_state=?, last_archived=?, revision=revision+1, preview=?, visible_updated_at=? WHERE key=?", (
+                session.updated_at.isoformat(), session.last_user_activity.isoformat(),
+                provider, session.last_archived,
                 preview, last_visible, session.key,
             ))
             # Unchanged message rows do not generate writes. Appends only write the suffix.

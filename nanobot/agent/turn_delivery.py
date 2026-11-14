@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
+from loguru import logger
+
 from nanobot.bus.delivery import DeliveryRequest
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.notification_delivery import notification_is_deliverable
@@ -377,13 +379,17 @@ class TurnDelivery:
                     "response_sources": [dataclasses.asdict(self._response_source)],
                 })
             if response.channel != "websocket" or stop_reason != "error":
-                delivery = DeliveryRequest.from_context(
-                    self.input_message.metadata, self.session_key,
-                    self.delivery_message.session_generation,
-                )
-                if delivery is not None:
-                    response = dataclasses.replace(response, delivery=delivery)
-                await self.bus.publish_outbound(response)
+                # Suppress NOOP responses (e.g., hourly check-in when user is active)
+                if response.content.strip() == "__NOOP__":
+                    logger.debug("TurnDelivery: suppressing NOOP response")
+                else:
+                    delivery = DeliveryRequest.from_context(
+                        self.input_message.metadata, self.session_key,
+                        self.delivery_message.session_generation,
+                    )
+                    if delivery is not None:
+                        response = dataclasses.replace(response, delivery=delivery)
+                    await self.bus.publish_outbound(response)
         elif self.lifecycle_message.channel == "cli":
             await self.bus.publish_outbound(
                 OutboundMessage(
