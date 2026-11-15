@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import re
 import time
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
@@ -380,7 +381,8 @@ class TurnDelivery:
                 })
             if response.channel != "websocket" or stop_reason != "error":
                 # Suppress NOOP responses (e.g., hourly check-in when user is active)
-                if response.content.strip() == "__NOOP__":
+                # Allow minor variations like trailing punctuation/whitespace
+                if re.fullmatch(r"__NOOP__[.!?]?\s*", response.content.strip()):
                     logger.debug("TurnDelivery: suppressing NOOP response")
                 else:
                     delivery = DeliveryRequest.from_context(

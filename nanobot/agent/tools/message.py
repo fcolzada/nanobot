@@ -1,5 +1,6 @@
 # pyright: reportIncompatibleMethodOverride=false
 
+import re
 from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
@@ -244,7 +245,8 @@ class MessageTool(Tool):
             return f"Message acknowledged for {channel}:{chat_id} (not delivered)"
 
         # Suppress NOOP responses from cron jobs (e.g., hourly check-in when active)
-        if content.strip() == "__NOOP__":
+        # Allow minor variations like trailing punctuation/whitespace
+        if re.fullmatch(r"__NOOP__[.!?]?\s*", content.strip()):
             logger.debug("MessageTool: suppressing NOOP response")
             return f"Message suppressed (NOOP) for {channel}:{chat_id}"
 
