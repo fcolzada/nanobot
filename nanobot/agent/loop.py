@@ -2334,7 +2334,11 @@ class AgentLoop:
                 staged_provider_state = True
         elif stored_state is not None:
             session.provider_state = None
-        if ctx.kind is TurnKind.USER and ctx.commit_session:
+        if (
+            ctx.kind is TurnKind.USER
+            and ctx.commit_session
+            and not is_cron_turn(ctx.msg.metadata)
+        ):
             ctx.input_persisted_early = await self._persist_user_message_early(
                 ctx.msg,
                 session,
